@@ -1,9 +1,9 @@
 // Offline-first app shell. Bump VERSION whenever a cached file changes.
-const VERSION = 'bandkit-v2';
+const VERSION = 'bandkit-v3';
 const ASSETS = [
   './', 'index.html', 'manifest.webmanifest',
   'css/styles.css',
-  'js/app.js', 'js/store.js', 'js/ui.js', 'js/util.js', 'js/views.js',
+  'js/app.js', 'js/api.js', 'js/gate.js', 'js/store.js', 'js/ui.js', 'js/util.js', 'js/views.js',
   'vendor/qrcode.js', 'vendor/jsQR.js',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'
 ];
@@ -24,6 +24,7 @@ self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
   if (url.origin !== location.origin) return;
+  if (url.pathname.includes('/api/')) return; // live data always goes straight to the server
   // Network first so updates show up, falling back to cache when offline.
   e.respondWith(
     fetch(e.request)

@@ -1,0 +1,18 @@
+{
+  // One Worker + one D1 database per band. The default block below is the trial deployment.
+  // To add a band, create a D1 database, copy a block under "env" and run: npx wrangler deploy --env <slug>
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "bandkit",
+  "main": "worker/index.js",
+  "compatibility_date": "2025-09-01",
+  "assets": { "directory": "./public", "binding": "ASSETS", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*"] },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "bandkit-trial", "database_id": "6b0556bb-41bd-4975-b1f0-c2c5da343cf0" }
+  ],
+  "env": {
+    // "example-band": {
+    //   "name": "bandkit-example-band",
+    //   "d1_databases": [{ "binding": "DB", "database_name": "bandkit-example-band", "database_id": "PASTE-ID-HERE" }]
+    // }
+  }
+}

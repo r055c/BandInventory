@@ -512,7 +512,7 @@ export function settingsView() {
   </div>
   <div class="card stack" style="gap:12px">
     <h2 class="section-title" style="font-size:16px">Your data</h2>
-    <p class="small muted" style="margin:0;line-height:1.5">Everything is stored on this device only. Export a backup now and then, and use it to move to a new phone.</p>
+    <p class="small muted" style="margin:0;line-height:1.5">${S.mode === 'cloud' ? 'Your data is stored securely online for this band and shared by everyone who signs in. Export a backup now and then for safekeeping.' : 'Everything is stored on this device only. Export a backup now and then, and use it to move to a new phone.'}</p>
     <div class="row" style="flex-wrap:wrap">
       <button class="btn btn-secondary btn-sm" id="export">Export backup</button>
       <label class="btn btn-secondary btn-sm" for="import-file" style="cursor:pointer">Import backup</label>
@@ -521,6 +521,11 @@ export function settingsView() {
     </div>
     ${S.sectionOn('instruments') || S.sectionOn('uniforms') || S.sectionOn('accessories') ? `<div class="row" style="flex-wrap:wrap">${Object.keys(S.KINDS).filter((k) => S.sectionOn(S.KINDS[k].section)).map((k) => `<a class="btn btn-secondary btn-sm" href="#/labels/${k}">Print all ${esc(S.KINDS[k].label.toLowerCase())} labels</a>`).join('')}${S.sectionOn('music') ? `<a class="btn btn-secondary btn-sm" href="#/labels/piece">Print music labels</a>` : ''}</div>` : ''}
   </div>
+  ${S.mode === 'cloud' ? `<div class="card stack" style="gap:12px">
+    <h2 class="section-title" style="font-size:16px">Account</h2>
+    <p class="small muted" style="margin:0;line-height:1.5">Everyone with the band password shares this inventory. Changing the password signs out every other device.</p>
+    <div class="row" style="flex-wrap:wrap"><button class="btn btn-secondary btn-sm" id="chpw">Change password</button><button class="btn btn-secondary btn-sm" id="signout">Sign out</button></div>
+  </div>` : ''}
   <div class="small muted" style="text-align:center;padding-bottom:8px">Band Kit</div>`;
   return {
     html, nav: 'settings',
@@ -545,13 +550,22 @@ export function settingsView() {
           return;
         }
         if (e.target.closest('#export')) { download(`band-kit-backup-${new Date().toISOString().slice(0, 10)}.json`, S.exportJson()); toast('Backup downloaded'); }
-        if (e.target.closest('#erase') && await confirmDialog('Erase all data?', 'This removes every item, member, piece and setting from this device. Export a backup first if unsure.', 'Erase everything', true)) { S.eraseAll(); toast('All data erased'); refresh(); }
+        if (e.target.closest('#erase') && await confirmDialog('Erase all data?', S.mode === 'cloud' ? 'This removes every item, member and piece for the whole band, on every device. Export a backup first if unsure.' : 'This removes every item, member, piece and setting from this device. Export a backup first if unsure.', 'Erase everything', true)) {
+          try { await S.eraseAll(); toast('All data erased'); refresh(); } catch (err) { toast(err.message || 'Could not erase'); }
+        }
+        if (e.target.closest('#signout') && await confirmDialog('Sign out?', 'You will need the band password to sign in again on this device.', 'Sign out')) { S.signOut(); location.hash = '#/'; location.reload(); }
+        if (e.target.closest('#chpw')) {
+          const r = await formDialog({ title: 'Change password', message: 'Other devices will be signed out.', confirm: 'Change', fields: [
+            { name: 'current', label: 'Current password', type: 'password', required: true },
+            { name: 'next', label: 'New password (at least 6 characters)', type: 'password', required: true }] });
+          if (r) { try { await S.changePassword(r.current, r.next); toast('Password changed'); } catch (err) { toast(err.message || 'Could not change password'); } }
+        }
       });
       root.querySelector('#import-file').addEventListener('change', async (e) => {
         const f = e.target.files[0]; if (!f) return;
         try {
-          if (!(await confirmDialog('Replace current data?', 'Importing replaces everything on this device with the backup file.', 'Import', true))) return;
-          S.importJson(await readFileText(f)); toast('Backup imported'); refresh();
+          if (!(await confirmDialog('Replace current data?', S.mode === 'cloud' ? 'Importing replaces everything for the whole band with the backup file.' : 'Importing replaces everything on this device with the backup file.', 'Import', true))) return;
+          await S.importJson(await readFileText(f)); toast('Backup imported'); refresh();
         } catch (err) { toast(err.message || 'Could not import that file'); }
         e.target.value = '';
       });

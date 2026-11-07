@@ -1,4 +1,5 @@
-import { uid, nowIso, daysSince } from './util.js';
+import { uid, nowIso, daysSince, toast } from './util.js';
+import * as api from './api.js';
 
 const KEY = 'bandkit.v1';
 
@@ -58,9 +59,12 @@ function migrate(data) {
 }
 
 function persist() {
-  try { localStorage.setItem(KEY, JSON.stringify(state)); }
-  catch (e) { console.error(e); alert('This device is out of storage space, so your last change was not saved. Export a backup from Settings.'); }
+  try {
+    if (mode === 'cloud') localStorage.setItem(CLOUD_KEY, JSON.stringify({ state, synced }));
+    else localStorage.setItem(KEY, JSON.stringify(state));
+  } catch (e) { console.error(e); alert('This device is out of storage space, so your last change was not saved. Export a backup from Settings.'); }
 }
+const notify = () => listeners.forEach((l) => l());
 
 export const get = () => state;
 export const subscribe = (fn) => { listeners.add(fn); return () => listeners.delete(fn); };
@@ -68,23 +72,214 @@ export const subscribe = (fn) => { listeners.add(fn); return () => listeners.del
 export function update(fn) {
   fn(state);
   persist();
-  listeners.forEach((l) => l());
+  notify();
+  if (mode === 'cloud') sync();
 }
 
 export function exportJson() { return JSON.stringify(state, null, 2); }
 
-export function importJson(text) {
+export async function importJson(text) {
   const data = JSON.parse(text);
   if (!data || typeof data !== 'object' || !Array.isArray(data.items)) throw new Error('That file is not a Band Kit backup.');
+  if (mode === 'cloud') {
+    await flush();
+    await api.call('import', { method: 'POST', body: migrate(data) });
+    await pull(true);
+    return;
+  }
   state = migrate(data);
   persist();
-  listeners.forEach((l) => l());
+  notify();
 }
 
-export function eraseAll() {
+export async function eraseAll() {
+  if (mode === 'cloud') {
+    await flush();
+    await api.call('erase', { method: 'POST' });
+    await pull(true);
+    return;
+  }
   state = defaults();
   persist();
-  listeners.forEach((l) => l());
+  notify();
+}
+
+// ---------- cloud mode (one Worker + D1 database per band) ----------
+// The app always works from the local copy and pushes changes in the background, so it stays usable offline.
+const CLOUD_KEY = 'bandkit.cloud.v1';
+const POLL_MS = 20000;
+export let mode = 'local';
+export let syncState = 'idle'; // idle | syncing | offline
+let synced = null;
+let syncing = false;
+let dirty = false;
+let retryTimer = null;
+let pollTimer = null;
+let syncWaiters = [];
+
+const snapshot = (st) => ({
+  settings: JSON.stringify(st.settings),
+  members: Object.fromEntries(st.members.map((m) => [m.id, JSON.stringify(m)])),
+  items: Object.fromEntries(st.items.map((i) => [i.id, JSON.stringify(i)])),
+  pieces: Object.fromEntries(st.pieces.map((p) => [p.id, JSON.stringify(p)]))
+});
+
+function diff() {
+  const now = snapshot(state);
+  const ops = [];
+  if (now.settings !== synced.settings) ops.push({ coll: 'settings', json: now.settings });
+  for (const coll of ['members', 'items', 'pieces']) {
+    for (const [id, json] of Object.entries(now[coll])) if (synced[coll][id] !== json) ops.push({ coll, id, json });
+    for (const id of Object.keys(synced[coll])) if (!(id in now[coll])) ops.push({ coll, id, json: null });
+  }
+  return ops;
+}
+const hasPending = () => !!synced && diff().length > 0;
+
+function setSyncState(v) {
+  if (syncState === v) return;
+  syncState = v;
+  window.dispatchEvent(new Event('bk:sync'));
+}
+
+async function send(op) {
+  if (op.coll === 'settings') return api.call('settings', { method: 'PUT', body: JSON.parse(op.json) });
+  if (op.json === null) return api.call(`${op.coll}/${encodeURIComponent(op.id)}`, { method: 'DELETE' });
+  return api.call(`${op.coll}/${encodeURIComponent(op.id)}`, { method: 'PUT', body: JSON.parse(op.json) });
+}
+
+function markSynced(op) {
+  if (op.coll === 'settings') synced.settings = op.json;
+  else if (op.json === null) delete synced[op.coll][op.id];
+  else synced[op.coll][op.id] = op.json;
+}
+
+async function runOp(op) {
+  try { await send(op); }
+  catch (e) {
+    // Two devices handed out the same code at once: give this record a fresh one and try again.
+    if (e.status === 409 && op.json !== null && op.coll !== 'members') {
+      const doc = (op.coll === 'items' ? itemById : pieceById)(op.id);
+      if (!doc) return;
+      const { code } = await api.call('code', { method: 'POST', body: { kind: op.coll === 'pieces' ? 'piece' : doc.kind } });
+      doc.code = code;
+      persist(); notify();
+      toast(`Another device used that number, so this is now ${code}`, 4500);
+      return runOp({ ...op, json: JSON.stringify(doc) });
+    }
+    if (e.status === 400 || e.status === 413) { console.error('Server rejected a change', op.coll, e.message); }
+    else throw e;
+  }
+  markSynced(op);
+}
+
+export async function sync() {
+  if (mode !== 'cloud' || !synced) return;
+  if (syncing) { dirty = true; return; }
+  syncing = true;
+  clearTimeout(retryTimer);
+  try {
+    do {
+      dirty = false;
+      const ops = diff();
+      if (ops.length) setSyncState('syncing');
+      for (const op of ops) { await runOp(op); persist(); }
+    } while (dirty);
+    setSyncState('idle');
+  } catch (e) {
+    if (e.status === 401) { api.setToken(null); window.dispatchEvent(new Event('bk:auth')); }
+    else { setSyncState('offline'); retryTimer = setTimeout(sync, 15000); }
+  } finally {
+    syncing = false;
+    const waiters = syncWaiters; syncWaiters = [];
+    waiters.forEach((w) => w());
+  }
+}
+
+// Wait until pending changes have been sent (used before bulk operations).
+async function flush() {
+  if (!hasPending() && !syncing) return;
+  await new Promise((r) => { syncWaiters.push(r); sync(); });
+  if (hasPending()) throw new Error('Could not reach the server. Check your connection and try again.');
+}
+
+export async function pull(force = false) {
+  if (mode !== 'cloud') return false;
+  const remote = await api.call('state');
+  if (!force && (syncing || hasPending())) return false;
+  const next = migrate(remote);
+  for (const k of Object.keys(next.counters)) next.counters[k] = Math.max(next.counters[k], state.counters[k] || 0);
+  const same = JSON.stringify(next) === JSON.stringify(state);
+  state = next;
+  synced = snapshot(state);
+  persist();
+  if (!same) notify();
+  return !same;
+}
+
+function startPolling() {
+  clearInterval(pollTimer);
+  const tick = async () => {
+    if (document.hidden || mode !== 'cloud' || !api.getToken()) return;
+    try {
+      if (hasPending()) await sync(); else { await pull(); setSyncState('idle'); }
+    } catch (e) {
+      if (e.status === 401) { api.setToken(null); window.dispatchEvent(new Event('bk:auth')); }
+      else setSyncState('offline');
+    }
+  };
+  pollTimer = setInterval(tick, POLL_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+  window.addEventListener('online', tick);
+}
+
+// Called once at start-up. Returns what the app should show first.
+export async function init() {
+  let info = null;
+  let offline = false;
+  try { info = await api.probe(); } catch { offline = true; }
+  const wasCloud = localStorage.getItem('bandkit.mode') === 'cloud';
+  if (!info && !(offline && wasCloud)) return { mode: 'local' };
+
+  mode = 'cloud';
+  localStorage.setItem('bandkit.mode', 'cloud');
+  state = defaults();
+  try {
+    const cached = JSON.parse(localStorage.getItem(CLOUD_KEY) || 'null');
+    if (cached && cached.state && cached.synced) { state = migrate(cached.state); synced = cached.synced; }
+  } catch {}
+
+  if (info && !info.configured) return { mode, stage: 'setup', info };
+  if (!api.getToken()) return { mode, stage: 'login', info };
+  try {
+    await pull(true);
+  } catch (e) {
+    if (e.status === 401) { api.setToken(null); return { mode, stage: 'login', info }; }
+    if (!synced) return { mode, stage: 'offline', info };
+    setSyncState('offline');
+  }
+  startPolling();
+  if (hasPending()) sync();
+  return { mode, stage: 'ready' };
+}
+
+export async function signIn(password, { setup = false, bandName = '' } = {}) {
+  const res = await api.call(setup ? 'setup' : 'login', { method: 'POST', auth: false, body: setup ? { password, bandName } : { password } });
+  api.setToken(res.token);
+  await pull(true);
+  startPolling();
+}
+
+export function signOut() {
+  api.setToken(null);
+  localStorage.removeItem(CLOUD_KEY);
+  state = defaults();
+  synced = null;
+}
+
+export async function changePassword(current, next) {
+  const res = await api.call('password', { method: 'POST', body: { current, next } });
+  api.setToken(res.token);
 }
 
 // ---------- lookups ----------
