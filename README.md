@@ -1,25 +1,53 @@
-# BandInventory
+# Band Kit (BandInventory)
 
-Instrument management for a volunteer-run youth band: QR codes on every instrument and case, a phone app to scan them, and a record of who has what, instrument details, repairs and accessories.
+Instrument, uniform and music management for a volunteer-run youth band. An installable web app (PWA) that works on a phone, tablet or laptop, offline.
 
-## Status
+## What it does
 
-Design mockups only, with sample data. No application code yet.
+- **Sections you choose:** Instruments, Uniforms, Music and Accessories/equipment. Switch each on or off in Settings, so a band only tracks what it needs.
+- **QR codes:** every item gets a code (`INS-001`, `UNI-004`, `MUS-012`). Print labels from an item page or from Settings. Instruments get a second label for the case (`INS-001-C`) that opens the same record.
+- **Scan with the phone camera:** opens the item straight away. There is a type-the-code fallback.
+- **Issue and return:** who has what, since when, with which extras (case, mouthpiece, hat and so on), and the condition each way.
+- **Records:** make, model, serial number, size, notes, full history, damage reports and repairs (with cost).
+- **Overdue flag:** items out longer than a set number of days are flagged on Home.
+- **Music library:** pieces with composer, grade, copy count and missing copies.
+- **Members:** the people who borrow kit, and what each has out.
+- **Settings:** band name, custom logo, sections, overdue days, usual extras, and backup/restore.
 
-## Mockups
+## Running it
 
-Seven phone screens in `mockups/`:
+It is plain HTML, CSS and JavaScript with no build step.
 
-| Screen | Image | Page |
-| --- | --- | --- |
-| Home | `images/1-home.jpg` | `html/1-home.html` |
-| Scan QR | `images/2-scan.jpg` | `html/2-scan.html` |
-| Instrument record | `images/3-instrument-record.jpg` | `html/3-instrument-record.html` |
-| Issue to member | `images/4-issue-to-member.jpg` | `html/4-issue-to-member.html` |
-| Uniforms | `images/5-uniforms.jpg` | `html/5-uniforms.html` |
-| Music | `images/6-music.jpg` | `html/6-music.html` |
-| Settings | `images/7-settings.jpg` | `html/7-settings.html` |
+```sh
+python3 -m http.server 8000
+# then open http://localhost:8000
+```
 
-Sections (Instruments, Uniforms, Music, and optional Accessories and equipment) can each be switched on or off in Settings, which also holds the band name and logo.
+Camera scanning needs HTTPS (or localhost), so for real use put it on any static host. A GitHub Pages workflow is included: in the repo go to **Settings → Pages → Build and deployment → Source: GitHub Actions**, then every push to `main` publishes the app. Open the published address on a phone and use "Add to Home Screen" to install it.
 
-The HTML pages are standalone and link to each other, so you can open `1-home.html` in a browser and click through. They are sized for a 390×844 phone screen.
+## Where the data lives
+
+Everything is stored in the browser on the device in use (`localStorage`). That keeps it free and private, but it means:
+
+- Each device has its own copy. Use **Settings → Export backup** and **Import backup** to move data between devices.
+- Clearing browser data erases it. Export a backup regularly.
+
+If the band wants several volunteers sharing live data, the next step is a small shared backend (for example Supabase). All data access goes through `js/store.js`, so that is the one file to change.
+
+## Layout
+
+```
+index.html            app shell
+css/styles.css        styles
+js/app.js             router
+js/views.js           every screen
+js/store.js           data model and storage
+js/ui.js, util.js     shared helpers, dialogs, icons
+vendor/               qrcode-generator (MIT) and jsQR (Apache-2.0)
+sw.js                 offline cache
+mockups/              the original design mockups
+```
+
+## Design mockups
+
+The original phone mockups are in `mockups/` (JPGs and clickable HTML pages).
